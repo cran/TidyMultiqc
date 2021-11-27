@@ -2,7 +2,11 @@
 title: "TidyMultiqc"
 output:
   html_document:
+    toc: true
+    toc_depth: 3
     df_print: paged
+pkgdown:
+  as_is: true
 vignette: >
   %\VignetteIndexEntry{TidyMultiqc}
   %\VignetteEngine{knitr::rmarkdown}
@@ -10,10 +14,11 @@ vignette: >
   %\Vignette
 ---
 
-```{r, include = FALSE}
+```{r, include = FALSE, setup}
 knitr::opts_chunk$set(
   collapse = TRUE,
-  comment = "#>"
+  comment = "#>",
+  cols.print = 3
 )
 multiqc_data_path = system.file("extdata", "wgs/multiqc_data.json", package = "TidyMultiqc")
 ```
@@ -29,17 +34,25 @@ to indicate the path to this `multiqc_data.json` file. Feel free to set this
 variable to the path to this file on your system.
 
 ## Setup
-First, load the package:
-```{r setup}
+First, install the package using:
+```{r, eval=FALSE}
+install.packages("TidyMultiqc")
+```
+
+Then if you want, you can load the package:
+```{r, eval=FALSE}
 library(TidyMultiqc)
 ```
+
+However, for the sake of this tutorial we will explicitly use namespaced functions, so we won't be using `library` a great deal.
 
 ## Basic Usage
 The main entry point to the `TidyMultiqc` package is the function `load_multiqc`.
 A basic invocation of this function looks like this:
 
+(note the arrow for scrolling through columns)
 ```{r paged.print=TRUE}
-df = load_multiqc(multiqc_data_path)
+df = TidyMultiqc::load_multiqc(multiqc_data_path)
 df
 ```
 We've now generated a `tibble` (a kind of data frame), whose rows are samples in the QC report, and whose columns are QC data and metadata about these samples.
@@ -50,14 +63,14 @@ We can also extract the "raw" statistics, which includes some fields normally hi
 These statistics will have the prefix `raw.<toolname>.` where `<toolname>` is the QC tool used to calculate it.
 
 ```{r}
-load_multiqc(multiqc_data_path, sections = 'raw')
+TidyMultiqc::load_multiqc(multiqc_data_path, sections = 'raw')
 ```
 Often you won't care about fields like `raw.qualimap_bamqc_genome_results.bam_file`, the path to the original BAM file, but 'raw' at least provides this option.
 
 You can also combine both `general` and `raw` sections by passing in a longer vector:
 
 ```{r}
-df_both = load_multiqc(multiqc_data_path, sections = c('raw', 'general'))
+df_both = TidyMultiqc::load_multiqc(multiqc_data_path, sections = c('raw', 'general'))
 ncol(df_both)
 ```
 That's a lot of columns!
@@ -71,9 +84,11 @@ This section will briefly talk about some downstream use-cases for this package.
 One use for this data frame is creating QC plots. For example, to visualise the duplication rate per sample:
 
 ```{r}
-library(ggplot2)
+library(magrittr)
 
-ggplot(df, aes(x=metadata.sample_id, y=general.percent_duplication)) + geom_col()
+df %>%
+  ggplot2::ggplot(ggplot2::aes(x=metadata.sample_id, y=general.percent_duplication)) +
+  ggplot2::geom_col()
 ```
 
 Of course, this is basically just replicating a plot already in the MultiQC report, but now we can customise it how we like!
@@ -86,42 +101,236 @@ t.test(df$general.percent_gc, mu=41)
 ```
 It seems that we cannot reject this hypothesis, so these may well be human samples!
 
+## Extracting Metadata
+
+It may be the case that your samples have important metadata that you want in your data frame.
+For example, it is common for the sample names or file names to be composed of a number of metadata fields, and indeed the report we are working with has IDs such as `P4107_1003`, which is composed of two identifiers.
+
+To include this metadata in our output, we need to provide the `find_metadata` argument to `load_multiqc`, which is a function that is called for each sample, and which returns a named vector of metadata fields for that sample.
+It also gets passed the entire parsed MultiQC JSON report, so the function can traverse the structure as it wants to extract metadata.
+
+### From the File Name
+Here is an example that parses the input file names to annotate additional metadata.
+Notice that the first argument our function is passed is a string which is the sample identifier for a sample, and how in this example we ignore the `parsed` argument.
+Also notice that the names we give to our return value ("batch" and "sample") are prefixed by "metadata" to become the final names in the data frame.
+
+```{r}
+TidyMultiqc::load_multiqc(
+  multiqc_data_path, 
+  find_metadata = function(sample, parsed) {
+    # Split the sample ID to obtain some metadata
+    segments <- stringr::str_split(sample, "_")[[1]]
+    c(
+      batch = segments[[1]],
+      sample = segments[[2]]
+    )
+  }
+)
+```
+### From the File Path
+
+We can extend this approach, but this time actually look up the file paths within the `report_data_sources` section of the MultiQC report:
+
+```{r}
+TidyMultiqc::load_multiqc(
+  multiqc_data_path, 
+  find_metadata = function(sample, parsed) {
+    # This gives us the path to the fastqc output file
+    filepath = parsed$report_data_sources$FastQC$all_sections[[sample]]
+    # Split into path segments
+    path_segments = stringr::str_split(filepath, "/")[[1]]
+    # The filename is the last path segment
+    filename = dplyr::last(path_segments)
+    # Split the filename using dots and underscores
+    name_segments = stringr::str_split(filename, "[_\\.]")[[1]]
+    # Arbitrarily assign names for the outputs
+    name_segments %>% purrr::set_names(LETTERS[1:length(name_segments)])
+  }
+)
+```
+Of course in a real application we would choose specific names for each field.
+
+### From MultiQC Configuration
+
+Finally, we might want to include metadata that doesn't relate to the sample at all.
+For example, MultiQC has a number of report fields prefixed by `config_` that we might want to store:
+
+```{r}
+TidyMultiqc::load_multiqc(
+  multiqc_data_path, 
+  find_metadata = function(sample, parsed) {
+    parsed[c(
+      "config_creation_date",
+      "config_version"
+    )]
+  }
+)
+```
+
 ## Extracting Plot Data
+
+### Motivation
 
 It is occasionally useful to extract QC data from the MultiQC plots. 
 For example, let's say we want to calculate the median quality score of every base in each sample.
-Unfortunately, MultiQC provides no numerical summary statistic for the mean read quality, it only has mapping quality and pass/fails for the per-base sequence quality:
+Unfortunately, MultiQC provides no numerical summary statistic for the read quality, it only has mapping quality and pass/fails for the per-base sequence quality:
 
-```{r}
-library(dplyr)
-
-df_both %>% select(contains('quality'))
+```{r message=FALSE, warning=FALSE}
+df_both %>% dplyr::select(dplyr::contains('quality'))
 ```
 
 However, our MultiQC report does have *plots* that contain this information.
 In particular, let's look at the "Per Sequence Quality Scores" plot.
 
-To extract this, we need to provide some new arguments to `load_multiqc`:
+### Listing Plots
+
+Firstly, we need the ID of the plot we want.
+This isn't necessarily obvious from just looking at the report, so we can use a utility function here:
+
+```{r, eval = FALSE}
+TidyMultiqc::list_plots(multiqc_data_path)
+```
+```{r, echo = FALSE}
+TidyMultiqc::list_plots(multiqc_data_path) %>%
+  dplyr::mutate(dplyr::across(dplyr::everything(), ~stringr::str_trunc(., 50)))
+```
+
+Now, we know we want the "Per Sequence Quality Scores" plot, and by looking at the data frame above we can tell that the corresponding ID is `fastqc_per_sequence_quality_scores_plot`.
+
+### Loading Plots
+
+Now that we have the plot ID, we can load the plot data.
+First, we need to tell `TidyMultiqc` to load include some plots by using `sections = "plot"` (you can load other sections at the same time, as explained above).
+Also, we need to pass the plot ID from the previous step into the `plots` argument:
 ```{r}
-load_multiqc(
+df = TidyMultiqc::load_multiqc(
   multiqc_data_path, 
-  sections = 'plots',
-  plot_opts = list(
-    `fastqc_per_sequence_quality_scores_plot` = list(
-      extractor = extract_histogram,
-      summary = list(median=median),
-      prefix = "quality"
-    )
+  sections = 'plot',
+  plots = "fastqc_per_sequence_quality_scores_plot"
+)
+df
+```
+
+We now have the plot data, but it's not in a very usable form! 
+This is because each sample has an entire data frame of plot data.
+At this point if you're comfortable using `dplyr` and `tidyr` to deal with nested data frames, you probably know what to do.
+Otherwise, read on.
+
+### Converting Plot Data
+
+Recall that we are after the median quality score of each sample.
+First, we should look at the plot data for a single sample to know what we're dealing with:
+
+```{r}
+df$plot.fastqc_per_sequence_quality_scores_plot[[1]]
+```
+So each data frame is a set of x, y pairs. 
+As it's a histogram plot, we know that the `x` value is the quality score, and `y` is the number of times that score has been counted.
+
+### Unnesting
+
+One possible way to process this nested data is to use `tidyr`:
+
+```{r}
+df %>%
+  tidyr::unnest(cols = plot.fastqc_per_sequence_quality_scores_plot)
+```
+
+As you can see, if we unnest in this way, we now have multiple rows for the same sample, which is a bit confusing (and not Tidy).
+However, if we use `group_by` and then `summarise`, this can be a useful way to calculate summary statistics. 
+For example, if we want the total number of reads, we could do the following:
+
+```{r}
+df %>%
+  tidyr::unnest(cols = plot.fastqc_per_sequence_quality_scores_plot) %>%
+  dplyr::group_by(metadata.sample_id) %>%
+  dplyr::summarise(total_reads = sum(y))
+```
+### Mapping with Purrr
+
+Although unnesting worked well in this example, it can get a bit awkward for more complex operations.
+In these cases we can use `purrr`.
+Refer to the next section for an example that compares both approaches.
+The below example sums the number of reads for each sample, as we have done above, but this time it uses `purrr::map_dbl` to map over the list of data frames:
+
+```{r}
+df %>%
+  dplyr::mutate(
+    total_reads = purrr::map_dbl(plot.fastqc_per_sequence_quality_scores_plot, ~sum(.$y)),
+    plot.fastqc_per_sequence_quality_scores_plot = NULL
+  )
+```
+
+### Properly Handling Histogram Data
+
+Of course, we actually want to find the median here, which is a bit harder.
+Luckily there exists a package called `HistDat` for generating summary statistics from histogram-type data.
+You can check out the package's manual and vignettes [here](https://cran.r-project.org/package=HistDat), but in brief, we want to convert each of these plot data frames into a `HistDat` object, which we can do using the same strategies as before.
+Then, using `HistDat`, we can calculate our summary statistics in one of the two ways mentioned above.
+
+Using the `tidyr` approach, we can unnest the plot data, group it, create a `HistDat` object for each group, and then produce new columns using the new `hist` column:
+
+```{r}
+df %>%
+  tidyr::unnest(cols = plot.fastqc_per_sequence_quality_scores_plot) %>%
+  dplyr::group_by(metadata.sample_id) %>%
+  dplyr::mutate(hist = list(HistDat::HistDat(vals = x, counts = y)), .keep = "unused") %>%
+  dplyr::mutate(
+    mean_coverage = hist %>% dplyr::first() %>% mean(),
+    median_coverage = hist %>% dplyr::first() %>% median(),
+    max_coverage = hist %>% dplyr::first() %>% max(),
+    hist= NULL
+  ) %>%
+  dplyr::slice(1)
+```
+Alternatively, using the `purrr` method, we can just map each plot data frame into a row of summary statistics.
+Much neater!
+
+```{r}
+df %>%
+  dplyr::mutate(
+    purrr::map_dfr(plot.fastqc_per_sequence_quality_scores_plot, function(plot_df){
+      hist = HistDat::HistDat(vals=plot_df$x, counts = plot_df$y)
+      list(
+        mean_coverage = mean(hist),
+        median_coverage = median(hist),
+        max_coverage = max(hist)
+      )
+    }),
+    plot.fastqc_per_sequence_quality_scores_plot = NULL
+  )
+
+```
+
+### Custom Plot Parsers
+
+So far, we have used `TidyMultiqc`'s built-in parsers.
+Each parser is a function that converts the plot JSON into a list of data frames.
+However, it is possible that we might encounter a new type of plot that is not yet implemented in `TidyMultiqc`.
+If this happens, the first thing you should do is [file an issue against this package](https://github.com/multimeric/TidyMultiqc/issues).
+
+Then, if you're daring, you can try to implement a parser.
+For your reference, you can refer to the existing parsers in the source code.
+Then, you can pass in your custom parser using the `plot_parsers` argument to `load_multiqc`:
+
+```{r}
+TidyMultiqc::load_multiqc(
+  multiqc_data_path, 
+  sections = 'plot',
+  plots = "fastqc_per_sequence_quality_scores_plot",
+  plot_parsers = list(
+    # This fake parser function takes a plot and just returns the iris dataset
+    xy_line = function(plot_data, name){
+      list(
+        sample_1 = list(
+          plot_name = list(iris)
+        )
+      )
+    }
   )
 )
 ```
-This looks pretty good!
-To walk through what we did here, we firstly specified the `plots` section.
-We also provided the `plot_opts` argument as a named list.
-The names of this list correspond to the plot names inside the MultiQC file (you can find them by looking in the `report_plot_data` section of the `multiqc_data.json` file).
-The values of this list are each a list of options for that plot.
-In this case, we used the following options:
 
-* `prefix = 'quality'` means that we want to rename the plot to `quality`, rather than use its uglier default name of `qualimap_coverage_histogram`.
-* `extractor = extract_histogram` means that this is a histogram plot (ie the y-axis are counts, and the x-axis are observations). Have a look at the reference manual for more types of extractor function.
-* `summary = list('median' = median)` is a list of summary statistics to apply to the data we have extracted. In this case, we want to take the median, so we pass in the `median` function. The name corresponding to this function is the name that will end up in the final data frame. 
+Finally, if your parser works, please submit a pull request to `TidyMultiqc` to share this with everyone!
+
+Using the strategies and patterns explained in this section, you should be in good stead to handle whatever plots MultiQC throws at you.
