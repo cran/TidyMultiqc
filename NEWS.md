@@ -1,3 +1,11 @@
+# Release 1.0.2
+
+* Fixed a bug where a `multiqc_data.json` file with `report_general_stats_data` containing arrays of data would break the parser [[#7](https://github.com/multimeric/TidyMultiqc/issues/7)]
+
+# Release 1.0.1
+
+* Fixed a bug when the `plots` vector is not provided but `sections = "plot"` [[#5]](https://github.com/multimeric/TidyMultiqc/issues/5)
+
 # Release 1.0.0
 
 ## Breaking Changes
